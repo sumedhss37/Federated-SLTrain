@@ -8,11 +8,11 @@ import time
 import torch
 from transformers import set_seed as hf_set_seed
 
-from .client import FederatedClient
-from .config import Config
-from .model import build_model, build_tokenizer
-from .server import FederatedServer
-from .utils import model_parameter_summary, set_seed
+from sltrain.client import FederatedClient
+from sltrain.config import Config
+from sltrain.model import build_model, build_tokenizer
+from sltrain.server import FederatedServer
+from sltrain.utils import model_parameter_summary, set_seed
 
 
 def parse_args():
