@@ -31,6 +31,7 @@ class WandbLogger:
             self.run.define_metric("train/*", step_metric="round")
             self.run.define_metric("client/*", step_metric="round")
             self.run.define_metric("server/*", step_metric="round")
+            self.run.define_metric("global/*", step_metric="round")
             self.run.define_metric("system/*", step_metric="round")
             self.run.define_metric("communication/*", step_metric="round")
 

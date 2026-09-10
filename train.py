@@ -14,6 +14,7 @@ from sltrain.model import build_model, build_tokenizer
 from sltrain.server import FederatedServer
 from sltrain.utils import model_parameter_summary, set_seed
 from sltrain.wandb_logger import WandbLogger
+from sltrain.data import C4ValidationSet, evaluate_model
 
 
 def parse_args():
@@ -45,6 +46,8 @@ def parse_args():
     p.add_argument("--output_dir", default=Config.output_dir)
     p.add_argument("--seed", type=int, default=Config.seed)
     p.add_argument("--no_gradient_checkpointing", action="store_true")
+    p.add_argument("--eval_every", type=int, default=Config.eval_every)
+    p.add_argument("--eval_batches", type=int, default=Config.eval_batches)
 
     p.add_argument("--wandb_project", default=Config.wandb_project)
     p.add_argument("--wandb_entity", default=Config.wandb_entity)
@@ -83,6 +86,8 @@ def main():
         output_dir=args.output_dir,
         seed=args.seed,
         gradient_checkpointing=not args.no_gradient_checkpointing,
+        eval_every=args.eval_every,
+        eval_batches=args.eval_batches,
         wandb_enabled=not args.no_wandb,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
@@ -108,6 +113,16 @@ def main():
     print(json.dumps(summary, indent=2))
 
     logger = WandbLogger(cfg, summary)
+
+    validation_set = C4ValidationSet(
+        tokenizer=tokenizer,
+        seq_len=cfg.seq_len,
+        batch_size=cfg.batch_size,
+        num_batches=cfg.eval_batches,
+        dataset_name=cfg.dataset_name,
+        dataset_config=cfg.dataset_config,
+    )
+    print(f"Prepared {len(validation_set)} fixed C4 validation batches")
 
     server = FederatedServer(model, cfg)
     clients = [FederatedClient(i, cfg, model, tokenizer) for i in range(cfg.num_clients)]
@@ -138,6 +153,25 @@ def main():
             elapsed = time.time() - t0
             mean_loss = sum(client_losses) / len(client_losses)
 
+            global_eval = None
+            eval_elapsed = 0.0
+            if cfg.eval_every > 0 and (r + 1) % cfg.eval_every == 0:
+                # Evaluate the actual aggregated global model, not the clients'
+                # local training losses.
+                eval_t0 = time.time()
+                server.load_into_model(model)
+                global_eval = evaluate_model(
+                    model,
+                    validation_set,
+                    torch.device(cfg.device if torch.cuda.is_available() else "cpu"),
+                )
+                eval_elapsed = time.time() - eval_t0
+                print(
+                    f"Round {r:03d} global eval: "
+                    f"val_loss={global_eval['loss']:.4f}, "
+                    f"val_ppl={global_eval['perplexity']:.2f}"
+                )
+
             # Rough dense communication size for the client payloads. Compression
             # bytes can be added later when the payload codec reports exact size.
             dense_bytes = sum(t.numel() * 4 for t in avg_delta.values())
@@ -150,6 +184,8 @@ def main():
                 "seconds": elapsed,
                 "tokens_this_round": sum(executed_steps) * cfg.batch_size * cfg.seq_len,
                 "tokens_seen_total": total_tokens,
+                "global_val_loss": None if global_eval is None else global_eval["loss"],
+                "global_val_perplexity": None if global_eval is None else global_eval["perplexity"],
             }
             metrics.append(row)
 
@@ -161,12 +197,19 @@ def main():
                 "server/avg_delta_l2": float(torch.sqrt(sum((v.float() ** 2).sum() for v in avg_delta.values()))),
                 "server/avg_delta_abs_mean": float(torch.cat([v.float().reshape(-1) for v in avg_delta.values()]).abs().mean()),
                 "system/round_seconds": elapsed,
+                "system/eval_seconds": eval_elapsed,
                 "system/max_cuda_memory_gb": (
                     torch.cuda.max_memory_allocated() / (1024 ** 3)
                     if torch.cuda.is_available() else 0.0
                 ),
                 "communication/dense_avg_delta_mb": dense_bytes / (1024 ** 2),
             }
+            if global_eval is not None:
+                wb_metrics["global/val_loss"] = global_eval["loss"]
+                wb_metrics["global/val_perplexity"] = global_eval["perplexity"]
+                wb_metrics["global/val_tokens"] = global_eval["tokens"]
+                wb_metrics["global/val_batches"] = global_eval["batches"]
+
             for client_id, loss in enumerate(client_losses):
                 wb_metrics[f"client/{client_id}/loss"] = loss
                 wb_metrics[f"client/{client_id}/perplexity"] = float(torch.exp(torch.tensor(loss)))

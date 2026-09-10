@@ -89,9 +89,11 @@ class Muon(Optimizer):
                 G2 = G @ G
                 x = a * x + b * (x @ G) + c * (x @ G2)
 
-        # Muon implementations commonly scale the orthogonalized update for
-        # rectangular matrices.
-        x = x * (max(m, n) / max(1, min(m, n))) ** 0.5
+        # KellerJordan/original Muon width scaling. The scale depends on the
+        # Linear fan-out/fan-in orientation: sqrt(max(1, rows / cols)).
+        # Do NOT use the symmetric max/min ratio here: that would also scale
+        # wide matrices, which is not the original adjustment.
+        x = x * (max(1.0, m / max(1, n))) ** 0.5
         return x
 
     @torch.no_grad()

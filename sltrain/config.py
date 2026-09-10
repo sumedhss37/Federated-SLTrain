@@ -54,6 +54,10 @@ class Config:
     gradient_checkpointing: bool = True
     log_every: int = 1
     save_every: int = 1
+
+    # Global validation
+    eval_every: int = 1
+    eval_batches: int = 16
     output_dir: str = "/kaggle/working/fed_sltrain_outputs"
 
     # Streaming data

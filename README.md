@@ -69,6 +69,15 @@ python3 train.py \
 - `--dtype`: `bfloat16`, `float16`, or `float32`.
 - `--no_gradient_checkpointing`: disable activation checkpointing.
 
+### Global validation
+- `--eval_every`: evaluate the aggregated global model every N outer rounds.
+- `--eval_batches`: number of fixed C4 validation batches used for each evaluation.
+
+The validation batches are prepared once from the C4 validation split and reused
+after every evaluation round, so `global/val_loss` and `global/val_perplexity` are
+directly comparable across rounds. These are measured on the actual aggregated
+global model after the server update.
+
 ### W&B
 - `--wandb_project`: W&B project.
 - `--wandb_entity`: optional entity.
