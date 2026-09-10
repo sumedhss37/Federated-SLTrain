@@ -58,7 +58,14 @@ class Muon(Optimizer):
 
     @staticmethod
     def _newton_schulz5(x: torch.Tensor, steps: int, eps: float) -> torch.Tensor:
-        """Approximate the polar factor of x using quintic Newton-Schulz."""
+        """Approximate the polar factor using a memory-efficient quintic NS iteration.
+
+        The previous implementation formed ``x @ x.T`` and then ``(x @ x.T) @
+        (x @ x.T) @ x``.  For SLTrain factors this can create enormous temporary
+        tensors because the larger dimension can be the model hidden dimension.
+        Here we always form the Gram matrix on the *smaller* dimension, so the
+        expensive square matrices are at most ``min(m, n) x min(m, n)``.
+        """
         x = x.float()
         norm = x.norm().clamp_min(eps)
         x = x / norm
@@ -66,22 +73,25 @@ class Muon(Optimizer):
         # Standard Muon quintic coefficients.
         a, b, c = 3.4445, -4.7750, 2.0315
 
-        # Work with the smaller Gram matrix by transposing tall-vs-wide input.
-        transposed = x.shape[0] < x.shape[1]
-        if transposed:
-            x = x.t()
+        m, n = x.shape
+        # Put the smaller dimension in Gram so all matrix products are small.
+        use_left_gram = m <= n
 
         for _ in range(steps):
-            xxt = x @ x.t()
-            x = a * x + b * (xxt @ x) + c * (xxt @ xxt @ x)
-
-        if transposed:
-            x = x.t()
+            if use_left_gram:
+                # G: [m, m], m <= n
+                G = x @ x.t()
+                G2 = G @ G
+                x = a * x + b * (G @ x) + c * (G2 @ x)
+            else:
+                # G: [n, n], n < m
+                G = x.t() @ x
+                G2 = G @ G
+                x = a * x + b * (x @ G) + c * (x @ G2)
 
         # Muon implementations commonly scale the orthogonalized update for
-        # rectangular matrices.  This is the original-style adjustment.
-        rows, cols = x.shape
-        x = x * (max(rows, cols) / max(1, min(rows, cols))) ** 0.5
+        # rectangular matrices.
+        x = x * (max(m, n) / max(1, min(m, n))) ** 0.5
         return x
 
     @torch.no_grad()
