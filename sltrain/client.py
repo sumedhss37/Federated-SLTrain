@@ -98,4 +98,5 @@ class FederatedClient:
         # Explicitly free transient GPU memory before the next client.
         del end_state
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
-        return payload, (total_loss / max(executed, 1), executed)
+        tokens_seen = executed * self.cfg.batch_size * self.cfg.seq_len
+        return payload, (total_loss / max(executed, 1), executed, tokens_seen)

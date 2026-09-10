@@ -4,3 +4,4 @@ accelerate>=0.34
 safetensors>=0.4.3
 tqdm>=4.66
 sentencepiece>=0.2
+wandb>=0.18

@@ -50,6 +50,12 @@ class Config:
     # Streaming data
     allow_data_repeat: bool = False
 
+    # W&B
+    wandb_enabled: bool = True
+    wandb_project: str = "fed-sltrain"
+    wandb_entity: str = ""
+    wandb_run_name: str = ""
+
     def to_dict(self):
         return asdict(self)
 

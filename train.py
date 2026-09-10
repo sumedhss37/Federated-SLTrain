@@ -13,6 +13,7 @@ from sltrain.config import Config
 from sltrain.model import build_model, build_tokenizer
 from sltrain.server import FederatedServer
 from sltrain.utils import model_parameter_summary, set_seed
+from sltrain.wandb_logger import WandbLogger
 
 
 def parse_args():
@@ -37,6 +38,11 @@ def parse_args():
     p.add_argument("--output_dir", default=Config.output_dir)
     p.add_argument("--seed", type=int, default=Config.seed)
     p.add_argument("--no_gradient_checkpointing", action="store_true")
+
+    p.add_argument("--wandb_project", default=Config.wandb_project)
+    p.add_argument("--wandb_entity", default=Config.wandb_entity)
+    p.add_argument("--wandb_run_name", default=Config.wandb_run_name)
+    p.add_argument("--no_wandb", action="store_true")
     return p.parse_args()
 
 
@@ -63,6 +69,10 @@ def main():
         output_dir=args.output_dir,
         seed=args.seed,
         gradient_checkpointing=not args.no_gradient_checkpointing,
+        wandb_enabled=not args.no_wandb,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_run_name=args.wandb_run_name,
     )
 
     os.makedirs(cfg.output_dir, exist_ok=True)
@@ -79,46 +89,106 @@ def main():
         if hasattr(model.config, "use_cache"):
             model.config.use_cache = False
 
+    summary = model_parameter_summary(model)
     print(f"Replaced {len(replaced)} Linear layers with SLLinear")
-    print(json.dumps(model_parameter_summary(model), indent=2))
+    print(json.dumps(summary, indent=2))
+
+    logger = WandbLogger(cfg, summary)
 
     server = FederatedServer(model, cfg)
     clients = [FederatedClient(i, cfg, model, tokenizer) for i in range(cfg.num_clients)]
 
     metrics = []
-    for r in range(cfg.rounds):
-        t0 = time.time()
-        payloads = []
-        client_losses = []
-        executed_steps = []
+    total_tokens = 0
 
-        for client in clients:
-            payload, (loss, nsteps) = client.train_round(server.global_state)
-            payloads.append(payload)
-            client_losses.append(loss)
-            executed_steps.append(nsteps)
-            print(f"Round {r:03d} client {client.client_id}: loss={loss:.4f}, steps={nsteps}")
+    try:
+        for r in range(cfg.rounds):
+            t0 = time.time()
+            payloads = []
+            client_losses = []
+            executed_steps = []
 
-        avg_delta = server.aggregate_payload(payloads)
-        elapsed = time.time() - t0
-        row = {
-            "round": r,
-            "mean_client_loss": sum(client_losses) / len(client_losses),
-            "client_losses": client_losses,
-            "executed_steps": executed_steps,
-            "seconds": elapsed,
-        }
-        metrics.append(row)
-        print(f"Round {r:03d} complete: mean_loss={row['mean_client_loss']:.4f}, time={elapsed:.1f}s")
+            for client in clients:
+                payload, stats = client.train_round(server.global_state)
+                loss, nsteps, ntokens = stats
+                payloads.append(payload)
+                client_losses.append(loss)
+                executed_steps.append(nsteps)
+                total_tokens += ntokens
+                print(
+                    f"Round {r:03d} client {client.client_id}: "
+                    f"loss={loss:.4f}, steps={nsteps}, tokens={ntokens}"
+                )
 
-        if (r + 1) % cfg.save_every == 0:
-            path = server.save(cfg.output_dir, r + 1)
-            print(f"Saved: {path}")
+            avg_delta = server.aggregate_payload(payloads)
+            elapsed = time.time() - t0
+            mean_loss = sum(client_losses) / len(client_losses)
 
-        with open(os.path.join(cfg.output_dir, "metrics.json"), "w") as f:
-            json.dump(metrics, f, indent=2)
+            # Rough dense communication size for the client payloads. Compression
+            # bytes can be added later when the payload codec reports exact size.
+            dense_bytes = sum(t.numel() * 4 for t in avg_delta.values())
 
-    print("Federated SLTrain finished.")
+            row = {
+                "round": r,
+                "mean_client_loss": mean_loss,
+                "client_losses": client_losses,
+                "executed_steps": executed_steps,
+                "seconds": elapsed,
+                "tokens_this_round": sum(executed_steps) * cfg.batch_size * cfg.seq_len,
+                "tokens_seen_total": total_tokens,
+            }
+            metrics.append(row)
+
+            wb_metrics = {
+                "train/mean_client_loss": mean_loss,
+                "train/mean_client_perplexity": float(torch.exp(torch.tensor(mean_loss))),
+                "train/tokens_this_round": row["tokens_this_round"],
+                "train/tokens_seen_total": total_tokens,
+                "server/avg_delta_l2": float(torch.sqrt(sum((v.float() ** 2).sum() for v in avg_delta.values()))),
+                "server/avg_delta_abs_mean": float(torch.cat([v.float().reshape(-1) for v in avg_delta.values()]).abs().mean()),
+                "system/round_seconds": elapsed,
+                "system/max_cuda_memory_gb": (
+                    torch.cuda.max_memory_allocated() / (1024 ** 3)
+                    if torch.cuda.is_available() else 0.0
+                ),
+                "communication/dense_avg_delta_mb": dense_bytes / (1024 ** 2),
+            }
+            for client_id, loss in enumerate(client_losses):
+                wb_metrics[f"client/{client_id}/loss"] = loss
+                wb_metrics[f"client/{client_id}/perplexity"] = float(torch.exp(torch.tensor(loss)))
+                wb_metrics[f"client/{client_id}/steps"] = executed_steps[client_id]
+
+            logger.log_round(wb_metrics, r)
+
+            print(
+                f"Round {r:03d} complete: mean_loss={mean_loss:.4f}, "
+                f"time={elapsed:.1f}s"
+            )
+
+            if (r + 1) % cfg.save_every == 0:
+                path = server.save(cfg.output_dir, r + 1)
+                print(f"Saved: {path}")
+
+            with open(os.path.join(cfg.output_dir, "metrics.json"), "w") as f:
+                json.dump(metrics, f, indent=2)
+
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+
+        final_path = server.save(cfg.output_dir, cfg.rounds)
+        logger.log_final_model(final_path)
+        logger.log_summary({
+            "final_round": cfg.rounds - 1,
+            "final_checkpoint": final_path,
+            "total_tokens_seen": total_tokens,
+            "num_clients": cfg.num_clients,
+            "model_name": cfg.model_name,
+            "dataset_name": cfg.dataset_name,
+        })
+        print(f"Final model logged to W&B as artifact from: {final_path}")
+        print("Federated SLTrain finished.")
+    finally:
+        logger.finish()
 
 
 if __name__ == "__main__":
