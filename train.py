@@ -29,7 +29,14 @@ def parse_args():
     p.add_argument("--rank", type=int, default=Config.rank)
     p.add_argument("--sparsity", type=float, default=Config.sparsity)
     p.add_argument("--lora_alpha", type=float, default=Config.lora_alpha)
+    p.add_argument("--client_optimizer", choices=["adamw", "muon"], default=Config.client_optimizer)
     p.add_argument("--client_lr", type=float, default=Config.client_lr)
+    p.add_argument("--muon_lr", type=float, default=Config.muon_lr)
+    p.add_argument("--muon_momentum", type=float, default=Config.muon_momentum)
+    p.add_argument("--muon_ns_steps", type=int, default=Config.muon_ns_steps)
+    p.add_argument("--muon_weight_decay", type=float, default=Config.muon_weight_decay)
+    p.add_argument("--no_muon_nesterov", action="store_true")
+    p.add_argument("--compression_mode", choices=["sparse", "none"], default=Config.compression_mode)
     p.add_argument("--compression_density", type=float, default=Config.compression_density)
     p.add_argument("--server_lr", type=float, default=Config.server_lr)
     p.add_argument("--server_aggregator", choices=["fedavg", "optimizer"], default=Config.server_aggregator)
@@ -60,7 +67,14 @@ def main():
         rank=args.rank,
         sparsity=args.sparsity,
         lora_alpha=args.lora_alpha,
+        client_optimizer=args.client_optimizer,
         client_lr=args.client_lr,
+        muon_lr=args.muon_lr,
+        muon_momentum=args.muon_momentum,
+        muon_ns_steps=args.muon_ns_steps,
+        muon_weight_decay=args.muon_weight_decay,
+        muon_nesterov=not args.no_muon_nesterov,
+        compression_mode=args.compression_mode,
         compression_density=args.compression_density,
         server_lr=args.server_lr,
         server_aggregator=args.server_aggregator,

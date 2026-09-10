@@ -8,7 +8,7 @@ import torch
 from safetensors.torch import save_file
 
 from .aggregators import FedAvgAggregator, make_optimizer_aggregator
-from .compression import decompress_tensor
+from .compression import decompress_tensor, CompressedTensor
 from .utils import trainable_state_dict
 
 
@@ -35,7 +35,13 @@ class FederatedServer:
         acc = {name: torch.zeros_like(t, dtype=torch.float32) for name, t in self.global_state.items()}
         for payload in payloads:
             for name, packed in payload.items():
-                acc[name].add_(decompress_tensor(packed, dtype=torch.float32))
+                if isinstance(packed, CompressedTensor):
+                    value = decompress_tensor(packed, dtype=torch.float32)
+                elif torch.is_tensor(packed):
+                    value = packed.to(dtype=torch.float32)
+                else:
+                    raise TypeError(f"Unsupported payload type for {name}: {type(packed)}")
+                acc[name].add_(value)
 
         inv_m = 1.0 / len(payloads)
         avg = {name: t * inv_m for name, t in acc.items()}

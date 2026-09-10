@@ -24,9 +24,17 @@ class Config:
     exclude_linear_patterns: tuple = ("lm_head",)
 
     # Local optimizer
-    client_lr: float = 3e-4
+    client_optimizer: str = "adamw"  # adamw | muon
+    client_lr: float = 3e-4          # AdamW/fallback LR
     client_weight_decay: float = 0.0
     grad_clip: float = 1.0
+
+    # Client-side Muon (used for SLTrain .L/.R when client_optimizer=muon)
+    muon_lr: float = 0.02
+    muon_momentum: float = 0.95
+    muon_nesterov: bool = True
+    muon_ns_steps: int = 5
+    muon_weight_decay: float = 0.0
 
     # Federated outer optimizer
     server_aggregator: str = "fedavg"  # fedavg | optimizer
@@ -35,6 +43,7 @@ class Config:
     server_weight_decay: float = 0.0
 
     # SparseLoCo-style communication
+    compression_mode: str = "sparse"  # sparse | none
     compression_density: float = 0.02
     quant_bits: int = 2
     error_feedback_dtype: str = "float32"

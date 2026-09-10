@@ -1,93 +1,82 @@
-# Federated SLTrain for Kaggle
+# Federated SLTrain on Kaggle
 
-This project turns the SLTrain idea into a federated simulation that runs on one Kaggle GPU by executing clients sequentially. It is deliberately split into model, client, server, compression, and aggregation modules so the server optimizer can later be replaced by Muon without rewriting the federated protocol.
+This project implements a single-GPU federated simulation of SLTrain. Clients are executed sequentially on one GPU. SLTrain replaces selected Linear layers by `W = (alpha/r) L R + S`, with a fixed random support for the sparse component.
 
-## What is implemented
+## Client optimizer modes
 
-The original SLTrain paper parameterizes every selected linear weight matrix as a low-rank product plus a fixed-support sparse factor, `W = (alpha/r) L R + S`. The sparse support is chosen once at initialization, only sparse values are learned, and the remaining non-linear/non-linear-layer parameters stay full-rank. The paper reports Adam on all linear layers including FC and Q/K/V projections, with the remaining parameters updated full-rank. See the paper for the exact formulation and experimental setup.
+`--client_optimizer adamw` (default): AdamW on all trainable parameters.
 
-The federated pseudocode supplied with this task uses the following round structure:
+`--client_optimizer muon`: client-side Muon on the SLTrain low-rank factor matrices `*.L` and `*.R`, with AdamW on all remaining trainable parameters. This is the implementation of client-side Muon: Muon is applied to each client's local gradients at every local optimization step, before the client's final pseudo-gradient/model delta is formed and sent to the server.
 
-1. Broadcast global `L/R/S` components.
-2. Each client performs local optimization for `H` steps.
-3. Compute the client pseudo-gradient `delta = theta_start - theta_end`.
-4. Add local error-feedback residual, take Top-k, quantize to 2-bit, and update the residual.
-5. Average/decompress the client payloads at the server.
-6. Apply a server optimizer to the aggregated pseudo-gradient.
+The server remains a plain aggregator (`fedavg` by default). Client optimizer state is persistent across federated rounds and is kept on CPU between client executions.
 
-This repository follows that structure. Because real transformer models also contain full-rank parameters outside reparameterized linear layers, the implementation includes those trainable parameters in the same federated update dictionary as an engineering extension.
-
-## Kaggle setup
-
-```python
-!git clone <your-github-repo-or-uploaded-repo>
-%cd fed_sltrain
-!pip install -q -r requirements.txt
-```
-
-Or upload the folder/zip and install from the mounted path.
-
-## Smoke test
-
-The defaults are intentionally small enough for a first Kaggle run:
+## Example: client-side Muon, dense communication
 
 ```bash
-python -m sltrain.train \
+python3 train.py \
   --model_name EleutherAI/pythia-70m \
+  --dataset_name allenai/c4 \
+  --dataset_config en \
   --num_clients 2 \
-  --rounds 2 \
-  --local_steps 3 \
-  --batch_size 2 \
+  --rounds 5 \
+  --local_steps 10 \
+  --batch_size 4 \
   --seq_len 256 \
   --rank 16 \
   --sparsity 0.03 \
-  --compression_density 0.02 \
-  --dtype bfloat16
+  --client_optimizer muon \
+  --muon_lr 0.02 \
+  --muon_momentum 0.95 \
+  --muon_ns_steps 5 \
+  --compression_mode none
 ```
 
-For a longer run, increase `rounds` and `local_steps` after verifying the smoke test.
+## Main knobs
 
-## Switching to Muon later
+### Federated/data
+- `--num_clients`: number of simulated clients.
+- `--rounds`: number of outer federated rounds.
+- `--local_steps`: local optimizer steps per client per round.
+- `--batch_size`: micro-batch size per local step.
+- `--seq_len`: tokens per sequence.
 
-The server does **not** know or care whether the outer optimizer is SGD, AdamW, or Muon. Clients always return compressed pseudo-gradients and the server receives an averaged dense pseudo-gradient dictionary.
+### SLTrain
+- `--rank`: low-rank factor dimension.
+- `--sparsity`: fraction of entries used by the fixed sparse support.
+- `--lora_alpha`: scales the low-rank term by `alpha/r`.
 
-The relevant interface is:
+### Client optimizer
+- `--client_optimizer adamw|muon`: choose the local optimizer.
+- `--client_lr`: AdamW learning rate, and fallback LR for non-Muon parameters when client Muon is enabled.
+- `--client_weight_decay`: AdamW weight decay.
+- `--muon_lr`: Muon learning rate for L/R factors.
+- `--muon_momentum`: Muon momentum coefficient.
+- `--muon_ns_steps`: Newton-Schulz iterations.
+- `--muon_weight_decay`: decoupled weight decay for Muon factors.
+- `--no_muon_nesterov`: disable Muon Nesterov momentum.
+- `--grad_clip`: global gradient clipping threshold.
 
-```python
-class Aggregator:
-    def step(global_state, avg_delta):
-        ...
-```
+### Communication
+- `--compression_mode sparse|none`: SparseLoCo-style compressed payload or dense client delta.
+- `--compression_density`: Top-k density used when compression is enabled.
 
-`OptimizerAggregator` already implements the adapter pattern expected by a torch-style optimizer: it sets `param.grad = avg_delta[name]` and calls `optimizer.step()`.
+### Server
+- `--server_aggregator fedavg|optimizer`: server aggregation strategy already present in the project.
+- `--server_lr`: server learning rate.
+- `--server_optimizer sgd|adamw`: optimizer used by the generic optimizer-based server aggregator.
 
-So a future Muon integration is isolated to the aggregator construction, for example:
+### Precision/runtime
+- `--dtype`: `bfloat16`, `float16`, or `float32`.
+- `--no_gradient_checkpointing`: disable activation checkpointing.
 
-```python
-from sltrain.aggregators import OptimizerAggregator
-from your_muon_package import Muon
+### W&B
+- `--wandb_project`: W&B project.
+- `--wandb_entity`: optional entity.
+- `--wandb_run_name`: optional run name.
+- `--no_wandb`: disable W&B.
 
-aggregator = OptimizerAggregator(
-    server.global_state,
-    optimizer_factory=Muon,
-    lr=0.02,
-    weight_decay=0.0,
-)
-```
+## Interpretation of client-side Muon
 
-If your Muon implementation only accepts 2-D tensors, `sltrain.muon_hook.make_split_muon_server_aggregator()` provides a ready pattern: Muon is applied to matrix-valued parameters while a fallback optimizer handles sparse values, embeddings/heads, and normalization vectors.
+For each local step, a client computes the ordinary gradient `g` from its current mini-batch. For `*.L` and `*.R`, Muon forms momentum, applies Newton-Schulz orthogonalization, and updates the factors. Other trainable parameters use AdamW. After all local steps, the client forms `delta = theta_start - theta_end`; this is what is aggregated by the server.
 
-## Files
-
-- `sltrain/layers.py`: custom SLTrain linear layer and replacement logic.
-- `sltrain/compression.py`: Top-k + 2-bit compression + error feedback.
-- `sltrain/client.py`: persistent client optimizer/error state and local training.
-- `sltrain/server.py`: global state and decompression/aggregation loop.
-- `sltrain/aggregators.py`: FedAvg and optimizer-backed server aggregation. This is the Muon insertion point.
-- `sltrain/data.py`: streaming C4 with deterministic client sharding.
-- `sltrain/train.py`: experiment entry point.
-- `sltrain/muon_hook.py`: small optional Muon adapter.
-
-## Important caveat about the supplied federated document
-
-The document gives the federated SLTrain protocol and says the communication quantization is 2-bit, but it does not define the exact scalar quantizer. This implementation therefore uses a four-level symmetric 2-bit quantizer with one scale per tensor. That part should be swapped out if you have a reference implementation of SparseLoCo's exact 2-bit codec.
+The project includes unit tests for SLTrain, compression, and Muon.

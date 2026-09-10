@@ -7,6 +7,7 @@ import torch
 from tqdm.auto import tqdm
 
 from .compression import compress_state_dict
+from .client_optim import build_client_optimizer
 from .data import C4ClientStream
 from .utils import load_trainable_state, optimizer_state_to_cpu, trainable_state_dict
 
@@ -43,11 +44,7 @@ class FederatedClient:
             allow_repeat=cfg.allow_data_repeat,
         )
 
-        self.optimizer = torch.optim.AdamW(
-            [p for p in self.model.parameters() if p.requires_grad],
-            lr=cfg.client_lr,
-            weight_decay=cfg.client_weight_decay,
-        )
+        self.optimizer = build_client_optimizer(self.model, cfg)
         self.state = ClientPersistentState()
 
     def _restore_optimizer(self):
@@ -71,7 +68,7 @@ class FederatedClient:
                 break
             batch = {k: v.to(self.device) for k, v in batch.items()}
 
-            self.optimizer.zero_grad(set_to_none=True)
+            self.optimizer.zero_grad()
             outputs = self.model(**batch, use_cache=False)
             loss = outputs.loss
             loss.backward()
@@ -89,11 +86,16 @@ class FederatedClient:
         end_state = trainable_state_dict(self.model)
         delta = {name: global_state[name].float() - end_state[name].float() for name in global_state}
 
-        payload = compress_state_dict(
-            delta,
-            self.state.error_residuals,
-            density=self.cfg.compression_density,
-        )
+        if self.cfg.compression_mode.lower() == "none":
+            payload = {name: value.clone() for name, value in delta.items()}
+        elif self.cfg.compression_mode.lower() == "sparse":
+            payload = compress_state_dict(
+                delta,
+                self.state.error_residuals,
+                density=self.cfg.compression_density,
+            )
+        else:
+            raise ValueError(f"Unknown compression_mode={self.cfg.compression_mode}")
 
         # Explicitly free transient GPU memory before the next client.
         del end_state
