@@ -81,3 +81,30 @@ def compress_state_dict(delta_state: Dict[str, torch.Tensor], residuals: Dict[st
 
 def decompress_state_dict(payload: Dict[str, CompressedTensor], dtype=torch.float32):
     return {name: decompress_tensor(p, dtype=dtype) for name, p in payload.items()}
+
+
+def payload_nbytes(payload) -> int:
+    """Return the logical bytes required to transmit one client payload.
+
+    For dense tensors this counts their current dtype bytes. For CompressedTensor
+    this counts the actual stored representation in this implementation: int64
+    indices, uint8 codes, one scalar scale, plus a small shape metadata cost.
+    Note that codes are currently stored one-per-byte (uint8), not bit-packed.
+    """
+    if torch.is_tensor(payload):
+        return int(payload.numel() * payload.element_size())
+
+    if isinstance(payload, CompressedTensor):
+        index_bytes = int(payload.indices.numel() * payload.indices.element_size())
+        code_bytes = int(payload.codes.numel() * payload.codes.element_size())
+        scale_bytes = int(payload.scale.numel() * payload.scale.element_size())
+        # Approximate fixed serialization metadata: ndim + int64 shape values.
+        metadata_bytes = 4 + 8 * len(payload.shape)
+        return index_bytes + code_bytes + scale_bytes + metadata_bytes
+
+    raise TypeError(f"Unsupported payload type: {type(payload)}")
+
+
+def state_payload_nbytes(payload_state: Dict[str, object]) -> int:
+    """Total logical transmitted bytes for one client state-dict payload."""
+    return sum(payload_nbytes(v) for v in payload_state.values())

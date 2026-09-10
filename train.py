@@ -15,6 +15,7 @@ from sltrain.server import FederatedServer
 from sltrain.utils import model_parameter_summary, set_seed
 from sltrain.wandb_logger import WandbLogger
 from sltrain.data import C4ValidationSet, evaluate_model
+from sltrain.compression import state_payload_nbytes
 
 
 def parse_args():
@@ -149,6 +150,12 @@ def main():
                     f"loss={loss:.4f}, steps={nsteps}, tokens={ntokens}"
                 )
 
+            # Logical client -> server communication volume for this outer round.
+            # This counts the actual payload representation produced by each client,
+            # rather than the dense size after server-side decompression.
+            client_upload_bytes = [state_payload_nbytes(payload) for payload in payloads]
+            total_client_upload_bytes = sum(client_upload_bytes)
+
             avg_delta = server.aggregate_payload(payloads)
             elapsed = time.time() - t0
             mean_loss = sum(client_losses) / len(client_losses)
@@ -203,6 +210,16 @@ def main():
                     if torch.cuda.is_available() else 0.0
                 ),
                 "communication/dense_avg_delta_mb": dense_bytes / (1024 ** 2),
+                "communication/client_to_server_bytes": total_client_upload_bytes,
+                "communication/client_to_server_mb": total_client_upload_bytes / (1024 ** 2),
+                "communication/client_to_server_avg_mb": (
+                    (total_client_upload_bytes / len(payloads)) / (1024 ** 2)
+                    if payloads else 0.0
+                ),
+                "communication/client_to_server_compression_ratio": (
+                    (dense_bytes * len(payloads)) / total_client_upload_bytes
+                    if total_client_upload_bytes > 0 else 0.0
+                ),
             }
             if global_eval is not None:
                 wb_metrics["global/val_loss"] = global_eval["loss"]
@@ -214,11 +231,15 @@ def main():
                 wb_metrics[f"client/{client_id}/loss"] = loss
                 wb_metrics[f"client/{client_id}/perplexity"] = float(torch.exp(torch.tensor(loss)))
                 wb_metrics[f"client/{client_id}/steps"] = executed_steps[client_id]
+                wb_metrics[f"communication/client/{client_id}_to_server_mb"] = (
+                    client_upload_bytes[client_id] / (1024 ** 2)
+                )
 
             logger.log_round(wb_metrics, r)
 
             print(
                 f"Round {r:03d} complete: mean_loss={mean_loss:.4f}, "
+                f"client->server={total_client_upload_bytes / (1024 ** 2):.2f} MB, "
                 f"time={elapsed:.1f}s"
             )
 
