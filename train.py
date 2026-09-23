@@ -37,6 +37,11 @@ def parse_args():
     p.add_argument("--muon_momentum", type=float, default=Config.muon_momentum)
     p.add_argument("--muon_ns_steps", type=int, default=Config.muon_ns_steps)
     p.add_argument("--muon_weight_decay", type=float, default=Config.muon_weight_decay)
+    p.add_argument("--lr_schedule", choices=["cosine", "constant"], default=Config.lr_schedule)
+    p.add_argument("--lr_warmup_rounds", type=int, default=Config.lr_warmup_rounds)
+    p.add_argument("--muon_min_lr", type=float, default=Config.muon_min_lr)
+    p.add_argument("--client_min_lr", type=float, default=Config.client_min_lr)
+    p.add_argument("--server_min_lr", type=float, default=Config.server_min_lr)
     p.add_argument("--no_muon_nesterov", action="store_true")
     p.add_argument("--compression_mode", choices=["sparse", "none"], default=Config.compression_mode)
     p.add_argument("--compression_density", type=float, default=Config.compression_density)
@@ -77,6 +82,11 @@ def main():
         muon_momentum=args.muon_momentum,
         muon_ns_steps=args.muon_ns_steps,
         muon_weight_decay=args.muon_weight_decay,
+        lr_schedule=args.lr_schedule,
+        lr_warmup_rounds=args.lr_warmup_rounds,
+        muon_min_lr=args.muon_min_lr,
+        client_min_lr=args.client_min_lr,
+        server_min_lr=args.server_min_lr,
         muon_nesterov=not args.no_muon_nesterov,
         compression_mode=args.compression_mode,
         compression_density=args.compression_density,
@@ -139,15 +149,16 @@ def main():
             executed_steps = []
 
             for client in clients:
-                payload, stats = client.train_round(server.global_state)
-                loss, nsteps, ntokens = stats
+                payload, stats = client.train_round(server.global_state, round_idx=r)
+                loss, nsteps, ntokens, muon_lr, client_lr = stats
                 payloads.append(payload)
                 client_losses.append(loss)
                 executed_steps.append(nsteps)
                 total_tokens += ntokens
                 print(
                     f"Round {r:03d} client {client.client_id}: "
-                    f"loss={loss:.4f}, steps={nsteps}, tokens={ntokens}"
+                    f"loss={loss:.4f}, steps={nsteps}, tokens={ntokens}, "
+                    f"muon_lr={muon_lr:.6g}, client_lr={client_lr:.6g}"
                 )
 
             # Logical client -> server communication volume for this outer round.
@@ -156,7 +167,7 @@ def main():
             client_upload_bytes = [state_payload_nbytes(payload) for payload in payloads]
             total_client_upload_bytes = sum(client_upload_bytes)
 
-            avg_delta = server.aggregate_payload(payloads)
+            avg_delta, server_lr = server.aggregate_payload(payloads, round_idx=r)
             elapsed = time.time() - t0
             mean_loss = sum(client_losses) / len(client_losses)
 
@@ -193,6 +204,9 @@ def main():
                 "tokens_seen_total": total_tokens,
                 "global_val_loss": None if global_eval is None else global_eval["loss"],
                 "global_val_perplexity": None if global_eval is None else global_eval["perplexity"],
+                "muon_lr": muon_lr,
+                "client_lr": client_lr,
+                "server_lr": server_lr,
             }
             metrics.append(row)
 
@@ -203,6 +217,9 @@ def main():
                 "train/tokens_seen_total": total_tokens,
                 "server/avg_delta_l2": float(torch.sqrt(sum((v.float() ** 2).sum() for v in avg_delta.values()))),
                 "server/avg_delta_abs_mean": float(torch.cat([v.float().reshape(-1) for v in avg_delta.values()]).abs().mean()),
+                "lr/muon": muon_lr,
+                "lr/client": client_lr,
+                "lr/server": server_lr,
                 "system/round_seconds": elapsed,
                 "system/eval_seconds": eval_elapsed,
                 "system/max_cuda_memory_gb": (
@@ -239,6 +256,7 @@ def main():
 
             print(
                 f"Round {r:03d} complete: mean_loss={mean_loss:.4f}, "
+                f"server_lr={server_lr:.6g}, "
                 f"client->server={total_client_upload_bytes / (1024 ** 2):.2f} MB, "
                 f"time={elapsed:.1f}s"
             )

@@ -9,7 +9,7 @@ from safetensors.torch import save_file
 
 from .aggregators import FedAvgAggregator, make_optimizer_aggregator
 from .compression import decompress_tensor, CompressedTensor
-from .utils import trainable_state_dict
+from .utils import trainable_state_dict, scheduled_lr
 
 
 class FederatedServer:
@@ -28,7 +28,7 @@ class FederatedServer:
         else:
             raise ValueError(f"Unknown server_aggregator={cfg.server_aggregator}")
 
-    def aggregate_payload(self, payloads):
+    def aggregate_payload(self, payloads, round_idx: int = 0):
         if not payloads:
             raise ValueError("No client payloads")
 
@@ -45,8 +45,17 @@ class FederatedServer:
 
         inv_m = 1.0 / len(payloads)
         avg = {name: t * inv_m for name, t in acc.items()}
+        current_lr = scheduled_lr(
+            self.cfg.server_lr, self.cfg.server_min_lr, round_idx,
+            max(self.cfg.rounds - 1, 1), self.cfg.lr_warmup_rounds, self.cfg.lr_schedule
+        )
+        if hasattr(self.aggregator, "server_lr"):
+            self.aggregator.server_lr = current_lr
+        if hasattr(self.aggregator, "optimizer"):
+            for group in self.aggregator.optimizer.param_groups:
+                group["lr"] = current_lr
         self.global_state = self.aggregator.step(self.global_state, avg)
-        return avg
+        return avg, current_lr
 
     def load_into_model(self, model):
         with torch.no_grad():

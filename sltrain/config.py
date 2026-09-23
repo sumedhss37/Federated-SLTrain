@@ -36,6 +36,13 @@ class Config:
     muon_ns_steps: int = 5
     muon_weight_decay: float = 0.0
 
+    # Adaptive learning-rate schedule (applied per federated round)
+    lr_schedule: str = "cosine"  # cosine | constant
+    lr_warmup_rounds: int = 3
+    muon_min_lr: float = 2e-4
+    client_min_lr: float = 3e-5
+    server_min_lr: float = 0.10
+
     # Federated outer optimizer
     server_aggregator: str = "fedavg"  # fedavg | optimizer
     server_lr: float = 1.0

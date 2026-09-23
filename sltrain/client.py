@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 from .compression import compress_state_dict
 from .client_optim import build_client_optimizer
 from .data import C4ClientStream
-from .utils import load_trainable_state, optimizer_state_to_cpu, trainable_state_dict
+from .utils import load_trainable_state, optimizer_state_to_cpu, trainable_state_dict, scheduled_lr
 
 
 @dataclass
@@ -54,9 +54,27 @@ class FederatedClient:
     def _save_optimizer(self):
         self.state.optimizer_state = optimizer_state_to_cpu(self.optimizer.state_dict())
 
-    def train_round(self, global_state: Dict[str, torch.Tensor]):
+    def _set_learning_rates(self, round_idx: int):
+        muon_lr = scheduled_lr(
+            self.cfg.muon_lr, self.cfg.muon_min_lr, round_idx,
+            max(self.cfg.rounds - 1, 1), self.cfg.lr_warmup_rounds, self.cfg.lr_schedule
+        )
+        client_lr = scheduled_lr(
+            self.cfg.client_lr, self.cfg.client_min_lr, round_idx,
+            max(self.cfg.rounds - 1, 1), self.cfg.lr_warmup_rounds, self.cfg.lr_schedule
+        )
+        if self.optimizer.muon is not None:
+            for group in self.optimizer.muon.param_groups:
+                group["lr"] = muon_lr
+        if self.optimizer.adamw is not None:
+            for group in self.optimizer.adamw.param_groups:
+                group["lr"] = client_lr
+        return muon_lr, client_lr
+
+    def train_round(self, global_state: Dict[str, torch.Tensor], round_idx: int = 0):
         load_trainable_state(self.model, global_state, self.device)
         self._restore_optimizer()
+        muon_lr, client_lr = self._set_learning_rates(round_idx)
         self.model.train()
 
         total_loss = 0.0
@@ -101,4 +119,4 @@ class FederatedClient:
         del end_state
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
         tokens_seen = executed * self.cfg.batch_size * self.cfg.seq_len
-        return payload, (total_loss / max(executed, 1), executed, tokens_seen)
+        return payload, (total_loss / max(executed, 1), executed, tokens_seen, muon_lr, client_lr)

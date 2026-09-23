@@ -1,3 +1,4 @@
+import math
 import os
 import random
 from typing import Dict
@@ -72,3 +73,28 @@ def optimizer_state_to_cpu(state_dict):
             return tuple(convert(v) for v in x)
         return x
     return convert(state_dict)
+
+
+def scheduled_lr(base_lr: float, min_lr: float, step: int, total_steps: int, warmup_steps: int = 0, schedule: str = "cosine") -> float:
+    """Return a per-round learning rate with optional linear warmup and cosine decay."""
+    base_lr = float(base_lr)
+    min_lr = float(min_lr)
+    step = int(step)
+    total_steps = max(int(total_steps), 1)
+    warmup_steps = max(int(warmup_steps), 0)
+
+    if schedule == "constant":
+        return base_lr
+    if schedule != "cosine":
+        raise ValueError(f"Unknown lr schedule: {schedule}")
+
+    if warmup_steps > 0 and step < warmup_steps:
+        return base_lr * float(step + 1) / float(warmup_steps)
+
+    if total_steps <= warmup_steps:
+        return min_lr
+
+    progress = (step - warmup_steps) / float(total_steps - warmup_steps)
+    progress = min(max(progress, 0.0), 1.0)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return min_lr + (base_lr - min_lr) * cosine
